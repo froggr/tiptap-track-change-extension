@@ -309,66 +309,87 @@ export const TrackChangeExtension = Extension.create<{ enabled: boolean, onStatu
           const thisExtension = getSelfExt(editor)
           const trackChangeEnabled = thisExtension.options.enabled
 
-          // Filter to only process actual content changes
-          const relevantTransactions = transactions.filter(tr => {
-            if (!tr.docChanged) return false
-            if (tr.getMeta('trackManualChanged')) return false
-            if (tr.getMeta('history$')) return false
-            const syncMeta = tr.getMeta('y-sync$')
-            if (syncMeta && syncMeta.isChangeOrigin) return false
-            return tr.steps.length > 0
+          // Check if any transaction is relevant
+          let hasRelevantChanges = false
+          for (const transaction of transactions) {
+            if (transaction.docChanged &&
+                !transaction.getMeta('trackManualChanged') &&
+                !transaction.getMeta('history$')) {
+              const syncMeta = transaction.getMeta('y-sync$')
+              if (!syncMeta || !syncMeta.isChangeOrigin) {
+                hasRelevantChanges = true
+                break
+              }
+            }
+          }
+
+          if (!hasRelevantChanges) return null
+
+          // Create marks
+          const insertionMark = newState.schema.marks.insertion.create({
+            'data-op-user-id': thisExtension.options.dataOpUserId || 'user',
+            'data-op-user-nickname': thisExtension.options.dataOpUserNickname || 'User',
+            'data-op-date': getMinuteTime()
           })
 
-          if (relevantTransactions.length === 0) return null
+          const deletionMark = newState.schema.marks.deletion.create({
+            'data-op-user-id': thisExtension.options.dataOpUserId || 'user',
+            'data-op-user-nickname': thisExtension.options.dataOpUserNickname || 'User',
+            'data-op-date': getMinuteTime()
+          })
 
-          // Create a new transaction to append our changes
+          // Build a new transaction to apply marks
           const tr = newState.tr
           let modified = false
 
-          relevantTransactions.forEach(transaction => {
-            transaction.steps.forEach((step: Step, index: number) => {
+          // Process all steps from all transactions
+          let currentPos = 0
+          for (const transaction of transactions) {
+            if (transaction.getMeta('trackManualChanged') || transaction.getMeta('history$')) continue
+
+            for (let i = 0; i < transaction.steps.length; i++) {
+              const step = transaction.steps[i]
+
               if (step instanceof ReplaceStep) {
-                // Handle insertions
+                const stepMap = step.getMap()
+
+                // Handle insertions - mark new content
                 if (step.slice.size > 0) {
-                  const insertionMark = newState.schema.marks.insertion.create({
-                    'data-op-user-id': thisExtension.options.dataOpUserId,
-                    'data-op-user-nickname': thisExtension.options.dataOpUserNickname,
-                    'data-op-date': getMinuteTime()
-                  })
-                  const deletionMark = newState.schema.marks.deletion.create()
-                  const from = step.from
-                  const to = step.from + step.slice.size
+                  const from = stepMap.map(step.from, -1)
+                  const to = from + step.slice.size
 
                   if (trackChangeEnabled) {
                     tr.addMark(from, to, insertionMark)
-                    modified = true
-                  } else {
-                    tr.removeMark(from, to, insertionMark.type)
-                    modified = true
+                    LOG_ENABLED && console.log('Adding insertion mark from', from, 'to', to)
                   }
-                  tr.removeMark(from, to, deletionMark.type)
                   modified = true
                 }
 
-                // Handle deletions - re-add with deletion mark
+                // Handle deletions - re-insert with deletion mark
                 if (step.from !== step.to && trackChangeEnabled) {
-                  const invertedStep = step.invert(transaction.docs[index])
-                  if (invertedStep.slice.size > 0) {
-                    const deletionMark = newState.schema.marks.deletion.create({
-                      'data-op-user-id': thisExtension.options.dataOpUserId,
-                      'data-op-user-nickname': thisExtension.options.dataOpUserNickname,
-                      'data-op-date': getMinuteTime()
-                    })
+                  const oldDoc = transaction.docs[i]
+                  const deletedSlice = oldDoc.slice(step.from, step.to)
 
-                    // Re-insert deleted content
-                    tr.insert(invertedStep.from, invertedStep.slice.content)
-                    tr.addMark(invertedStep.from, invertedStep.from + invertedStep.slice.size, deletionMark)
+                  // Check if deleted content has insertion marks (those can be truly deleted)
+                  let hasInsertionMark = false
+                  deletedSlice.content.forEach(node => {
+                    if (node.marks.some(m => m.type.name === MARK_INSERTION)) {
+                      hasInsertionMark = true
+                    }
+                  })
+
+                  if (!hasInsertionMark && deletedSlice.size > 0) {
+                    // Re-insert the deleted content with deletion mark
+                    const insertPos = stepMap.map(step.from, -1)
+                    tr.insert(insertPos, deletedSlice.content)
+                    tr.addMark(insertPos, insertPos + deletedSlice.size, deletionMark)
+                    LOG_ENABLED && console.log('Re-inserting deleted content at', insertPos, 'with deletion mark')
                     modified = true
                   }
                 }
               }
-            })
-          })
+            }
+          }
 
           if (modified) {
             tr.setMeta('trackManualChanged', true)
