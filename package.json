@@ -24,7 +24,12 @@
   ],
   "main": "dist/index.cjs.js",
   "module": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs.js"
+    }
+  },
   "scripts": {
     "clean": "rm -rf dist",
     "build": "npm run clean && rollup -c",
