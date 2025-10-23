@@ -405,7 +405,7 @@ export const TrackChangeExtension = Extension.create<{ enabled: boolean, onStatu
 
             // Fix cursor position to account for re-inserted content
             const currentSelection = newState.selection
-            const newSelection = currentSelection.map(tr.mapping)
+            const newSelection = currentSelection.map(tr.doc, tr.mapping)
             tr.setSelection(newSelection)
 
             LOG_ENABLED && console.log('Returning modified transaction with updated selection')
