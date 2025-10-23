@@ -283,7 +283,8 @@ export const TrackChangeExtension = Extension.create<{ enabled: boolean, onStatu
     LOG_ENABLED && console.log('selection and input status', p.transaction.selection.from, p.transaction.selection.to, p.editor.view.composing)
   },
   // @ts-ignore
-  addProseMirrorPlugins (props: {editor: Editor}) {
+  addProseMirrorPlugins () {
+    const extensionThis = this
     return [
       new Plugin({
         key: new PluginKey<any>('composing-check'),
@@ -299,269 +300,90 @@ export const TrackChangeExtension = Extension.create<{ enabled: boolean, onStatu
               composingStatus = IME_STATUS_CONTINUE
             }
           }
+        },
+        appendTransaction(transactions, oldState, newState) {
+          // Process track changes logic here
+          const editor = extensionThis.editor
+          if (!editor) return null
+
+          const thisExtension = getSelfExt(editor)
+          const trackChangeEnabled = thisExtension.options.enabled
+
+          // Filter to only process actual content changes
+          const relevantTransactions = transactions.filter(tr => {
+            if (!tr.docChanged) return false
+            if (tr.getMeta('trackManualChanged')) return false
+            if (tr.getMeta('history$')) return false
+            const syncMeta = tr.getMeta('y-sync$')
+            if (syncMeta && syncMeta.isChangeOrigin) return false
+            return tr.steps.length > 0
+          })
+
+          if (relevantTransactions.length === 0) return null
+
+          // Create a new transaction to append our changes
+          const tr = newState.tr
+          let modified = false
+
+          relevantTransactions.forEach(transaction => {
+            transaction.steps.forEach((step: Step, index: number) => {
+              if (step instanceof ReplaceStep) {
+                // Handle insertions
+                if (step.slice.size > 0) {
+                  const insertionMark = newState.schema.marks.insertion.create({
+                    'data-op-user-id': thisExtension.options.dataOpUserId,
+                    'data-op-user-nickname': thisExtension.options.dataOpUserNickname,
+                    'data-op-date': getMinuteTime()
+                  })
+                  const deletionMark = newState.schema.marks.deletion.create()
+                  const from = step.from
+                  const to = step.from + step.slice.size
+
+                  if (trackChangeEnabled) {
+                    tr.addMark(from, to, insertionMark)
+                    modified = true
+                  } else {
+                    tr.removeMark(from, to, insertionMark.type)
+                    modified = true
+                  }
+                  tr.removeMark(from, to, deletionMark.type)
+                  modified = true
+                }
+
+                // Handle deletions - re-add with deletion mark
+                if (step.from !== step.to && trackChangeEnabled) {
+                  const invertedStep = step.invert(transaction.docs[index])
+                  if (invertedStep.slice.size > 0) {
+                    const deletionMark = newState.schema.marks.deletion.create({
+                      'data-op-user-id': thisExtension.options.dataOpUserId,
+                      'data-op-user-nickname': thisExtension.options.dataOpUserNickname,
+                      'data-op-date': getMinuteTime()
+                    })
+
+                    // Re-insert deleted content
+                    tr.insert(invertedStep.from, invertedStep.slice.content)
+                    tr.addMark(invertedStep.from, invertedStep.from + invertedStep.slice.size, deletionMark)
+                    modified = true
+                  }
+                }
+              }
+            })
+          })
+
+          if (modified) {
+            tr.setMeta('trackManualChanged', true)
+            return tr
+          }
+          return null
         }
       })
     ]
   },
   // @ts-ignore
-  onTransaction: (props: { editor: Editor; transaction: Transaction }) => {
-    const { transaction, editor } = props
-    // chinese input status check
-    const isChineseStart = isStartChineseInput && composingStatus === IME_STATUS_CONTINUE
-    const isChineseInputting = !isStartChineseInput && composingStatus === IME_STATUS_CONTINUE
-    const isNormalInput = composingStatus === IME_STATUS_NORMAL // not ime mode
-    composingStatus = IME_STATUS_NORMAL // reset for next change
+  onSelectionUpdate () {
+    // Reset IME status
+    composingStatus = IME_STATUS_NORMAL
     isStartChineseInput = false
-    /**
-     * normal ime mode start, we can ignore the input and deal change when last confirm
-     * but what if it has a selection before? the selected content will loss for real. so we have to deal with it
-     */
-    // no change, ignore
-    if (!transaction.docChanged) { return }
-    // check if it is change by accept or reject
-    if (transaction.getMeta('trackManualChanged')) { return }
-    // if this is a redo or undo, ignore it.
-    if (transaction.getMeta('history$')) { return }
-    // check if it is synced by another client or the server, need to ignore too
-    const syncMeta = transaction.getMeta('y-sync$')
-    if (syncMeta && syncMeta.isChangeOrigin) {
-      LOG_ENABLED && console.log('sync from origin', syncMeta)
-      return
-    }
-    // has no real step
-    if (!transaction.steps.length) {
-      LOG_ENABLED && console.log('none content change')
-      return
-    }
-    // check if this tr was applied to editor: vue2 and vue3 have different result
-    const isThisTrApplied = transaction.before !== editor.state.tr.doc
-    const thisExtension = getSelfExt(editor)
-    const trackChangeEnabled = thisExtension.options.enabled
-    LOG_ENABLED && console.warn('内容变化，执行跟踪修订相关逻辑', transaction.steps.length, transaction)
-    /**
-     * Two main process
-     *
-     * 1. When Status disabled
-     *  a. the new insert content cannot be wrapped with insert or delete mark (avoid the original auto style by browser)
-     *  b. consider the ime mode
-     *  c. make the cursor pos right
-     *  d. can "remove the auto-used style" and "user edit" op be a single operation to history?
-     *
-     * 2. When Status Enabled(with more complex process)
-     *  a. mark the new content with insert
-     *  b. remove auto-used delete mark for new content
-     *  c. readd the deleted normal content and mark as delete
-     *  d. readd the deleted "delete char"
-     *  e. if "insert char" be deleted, just let it go
-     *  f. correct the final cursor position, too many cases to consider
-     *  h. careful with ime mode
-     *  i. ignore history updates
-     * 
-     * Test Case:
-     * 1. enabled: input char
-     * 1. enabled: delete normal char
-     * 1. enabled: delete the 'delete' char
-     * 1. enabled: input after the 'delete' char
-     * 1. enabled: delete the 'insert' char
-     * 1. enabled: input after the 'insert' char
-     * 1. enabled: make a selection and delete then
-     * 1. enabled: select normal char and input new text
-     * 1. enabled: select 'insert' chars and input new text
-     * 1. enabled: ime input after normal char
-     * 1. enabled: ime input after insert char
-     * 1. enabled: ime input after delete char
-     * 1. enabled: ime input when select normal chars
-     * 1. enabled: ime input when select insert chars
-     * 1. enabled: ime input when select delete chars
-     * 1. enabled: ime input when select both insert and delete chars
-     * 
-     *
-     * 2. disabled: input normal char
-     * 2. disabled: input after insert char
-     * 2. disabled: input after delete char
-     */
-    // copy the step, avoid the change the origin step info
-    const allSteps = transaction.steps.map(step => Step.fromJSON(editor.state.doc.type.schema, step.toJSON()))
-    LOG_ENABLED && console.log('allSteps', allSteps)
-    // latest cursor pos
-    // TODO: recognize selection direction and backspace/delete to get calculate new cursor pos
-    const currentNewPos = transaction.selection.from
-    LOG_ENABLED && console.log('currentNewPos', currentNewPos)
-    
-    // cursor offset, try to reset the pos in the end process
-    let posOffset = 0
-    let hasAddAndDelete = false
-    allSteps.forEach((step: Step, _index: number, _arr: Step[]) => {
-      if (step instanceof ReplaceStep) {
-        // loss chars
-        let delCount = 0
-        if (step.from !== step.to) {
-          /**
-           * means some content will be removed, but in this extension, we will reAdd it back
-           * note: if the old content is already 'insert', just let it go.
-           */
-          const slice = transaction.docs[_index].slice(step.from, step.to)
-          slice.content.forEach(node => {
-            const isInsertNode = node.marks.find(m => m.type.name === MARK_INSERTION)
-            if (!isInsertNode) {
-              // sum the none-insert mark size
-              // TODO: nodeSize or size filed? what if the node is a image or some other custom node
-              delCount += node.nodeSize
-            }
-          })
-        }
-        posOffset += delCount
-        // added chars in this step
-        const newCount = step.slice ? step.slice.size : 0
-        if (newCount && delCount) {
-          // if only add or del, don't need to change selection, it's already right
-          hasAddAndDelete = true
-        }
-      }
-    })
-    if (isNormalInput) {
-      // none ime mode
-      if (!hasAddAndDelete) {
-        // just delete or add, no need to correct cursor
-        posOffset = 0
-      }
-    } else if (isChineseStart) {
-      // first chinese char
-      if (hasAddAndDelete) {
-        /**
-         * input chinese char when a selection content exist
-         * need the readd the selected chars, so we need update the cursor
-         * but we cannot change the cursor in "inputting time", ,,,,need some more test
-         */
-        // posOffset -= 1
-      } else {
-        // just new content, ime software will make it right
-        posOffset = 0
-      }
-    } else if (isChineseInputting) {
-      // chinese input, at least two chars, no need to update cursor
-      posOffset = 0
-    }
-    // TODO: if there has multiple replace steps,we can ignore the cursor
-    LOG_ENABLED && console.table({
-      hasAddAndDelete,
-      isNormalInput,
-      isChineseStart,
-      isChineseInputting,
-      posOffset
-    })
-    
-    // get the correct tr to manipulate
-    // tr had been applied in vue2, and not in vue3
-    // so we get a new tr in vue2 by "editor.state.tr"
-    // TODO: if we use vue2, the cursor correction need to be more tested
-    const newChangeTr = isThisTrApplied ? editor.state.tr : transaction
-    
-    let reAddOffset = 0
-    allSteps.forEach((step: Step, index: number) => {
-      if (step instanceof ReplaceStep) {
-        const invertedStep = step.invert(transaction.docs[index])
-        if (step.slice.size) {
-          const insertionMark = editor.state.doc.type.schema.marks.insertion.create({
-            'data-op-user-id': thisExtension.options.dataOpUserId,
-            'data-op-user-nickname': thisExtension.options.dataOpUserNickname,
-            'data-op-date': getMinuteTime()
-          })
-          const deletionMark = editor.state.doc.type.schema.marks.deletion.create()
-          const from = step.from + reAddOffset
-          const to = step.from + reAddOffset + step.slice.size
-          if (trackChangeEnabled) {
-            // add insert mark to new content
-            newChangeTr.addMark(from, to, insertionMark)
-          } else {
-            // if disabled this extension, remove auto-used track mark for new content
-            newChangeTr.removeMark(from, to, insertionMark.type)
-          }
-          // remove auto-used delete mark for new content anyway
-          newChangeTr.removeMark(from, to, deletionMark.type)
-        }
-        if (step.from !== step.to && trackChangeEnabled) {
-          LOG_ENABLED && console.log('find content to readd', step)
-          // get the reverted step, so we can know what content is deleted in this step and readd then
-          // make sure use related doc in transaction. every step has the new doc with same order
-          // TODO: is there difference between vue2 and vue3
-          const skipSteps: Array<ReplaceStep> = []
-          // collect the content we need to ignore readd, because some content is insert mark before, there data need to be allowed delete
-          LOG_ENABLED && console.log('invertedStep', invertedStep)
-          const reAddStep = new ReplaceStep(
-            invertedStep.from + reAddOffset,
-            invertedStep.from + reAddOffset,
-            invertedStep.slice,
-            // @ts-ignore: what is internal means
-            invertedStep.structure
-          )
-          // make a empty step to replace the original "INSERT" mark, because these content don't need to readd
-          // the slice content maybe a TextNode or other node with any child content
-          // so we need to travel all the content to find the "INSERT" mark
-          let addedEmptyOffset = 0 // when empty step is added, record the offset to correct the next empty step, because the content will b shorter than the current when create next empty step
-          const travelContent = (content: Fragment, parentOffset: number) => {
-            content.forEach((node, offset) => {
-              const start = parentOffset + offset
-              const end = start + node.nodeSize
-              if (node.content && node.content.size) {
-                // this node has child content, need to travel
-                travelContent(node.content, start)
-              } else {
-                // this node is a text node, or a node without child content
-                if (node.marks.find(m => m.type.name === MARK_INSERTION)) {
-                  // construct a empty step, apply this after readd action applied
-                  skipSteps.push(new ReplaceStep(start - addedEmptyOffset, end - addedEmptyOffset, Slice.empty))
-                  addedEmptyOffset += node.nodeSize
-                  reAddOffset -= node.nodeSize
-                }
-              }
-            })
-          }
-          travelContent(invertedStep.slice.content, invertedStep.from)
-          reAddOffset += invertedStep.slice.size
-          // apply readd step action
-          newChangeTr.step(reAddStep)
-          const { from } = reAddStep
-          const to = from + reAddStep.slice.size
-          // add delete mark for readd content
-          newChangeTr.addMark(from, to, newChangeTr.doc.type.schema.marks.deletion.create({
-            'data-op-user-id': thisExtension.options.dataOpUserId,
-            'data-op-user-nickname': thisExtension.options.dataOpUserNickname,
-            'data-op-date': getMinuteTime()
-          }))
-          skipSteps.forEach((step) => {
-            // delete the content if it is already with insert mark
-            newChangeTr.step(step)
-          })
-        }
-      }
-    })
-
-    // Calculate new cursor position and update selection
-    const finalNewPos = trackChangeEnabled ? (currentNewPos + posOffset) : currentNewPos
-    if (trackChangeEnabled && newChangeTr.steps.length > 0) {
-      newChangeTr.setSelection(TextSelection.create(newChangeTr.doc, finalNewPos))
-      LOG_ENABLED && console.log('update cursor', finalNewPos)
-    }
-
-    // Apply the transaction if we made changes
-    if (newChangeTr.steps.length > 0) {
-      newChangeTr.setMeta('trackManualChanged', true)
-      const newState = editor.state.apply(newChangeTr)
-      editor.view.updateState(newState)
-    }
-
-    if (isChineseStart && hasAddAndDelete && trackChangeEnabled) {
-      // if the first chinese input and have some content selected
-      // just make it stop by blur action
-      // delete the selection and use just need paste the new content again
-      editor.commands.deleteSelection()
-      editor.commands.blur()
-      setTimeout(() => {
-        // focus again
-        editor.commands.focus()
-      }, 100)
-    }
   }
 })
 
