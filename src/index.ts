@@ -287,7 +287,7 @@ export const TrackChangeExtension = Extension.create<{ enabled: boolean, onStatu
     const extensionThis = this
     return [
       new Plugin({
-        key: new PluginKey<any>('composing-check'),
+        key: new PluginKey<any>('track-change-plugin'),
         props: {
           handleDOMEvents: {
             compositionstart: (_event) => {
@@ -302,12 +302,12 @@ export const TrackChangeExtension = Extension.create<{ enabled: boolean, onStatu
           }
         },
         appendTransaction(transactions, oldState, newState) {
-          // Process track changes logic here
-          const editor = extensionThis.editor
-          if (!editor) return null
+          LOG_ENABLED && console.log('appendTransaction called', transactions.length, 'transactions')
 
-          const thisExtension = getSelfExt(editor)
-          const trackChangeEnabled = thisExtension.options.enabled
+          // Get track change status directly from extension options
+          const trackChangeEnabled = extensionThis.options.enabled
+
+          LOG_ENABLED && console.log('Track changes enabled:', trackChangeEnabled)
 
           // Check if any transaction is relevant
           let hasRelevantChanges = false
@@ -327,14 +327,14 @@ export const TrackChangeExtension = Extension.create<{ enabled: boolean, onStatu
 
           // Create marks
           const insertionMark = newState.schema.marks.insertion.create({
-            'data-op-user-id': thisExtension.options.dataOpUserId || 'user',
-            'data-op-user-nickname': thisExtension.options.dataOpUserNickname || 'User',
+            'data-op-user-id': extensionThis.options.dataOpUserId || 'user',
+            'data-op-user-nickname': extensionThis.options.dataOpUserNickname || 'User',
             'data-op-date': getMinuteTime()
           })
 
           const deletionMark = newState.schema.marks.deletion.create({
-            'data-op-user-id': thisExtension.options.dataOpUserId || 'user',
-            'data-op-user-nickname': thisExtension.options.dataOpUserNickname || 'User',
+            'data-op-user-id': extensionThis.options.dataOpUserId || 'user',
+            'data-op-user-nickname': extensionThis.options.dataOpUserNickname || 'User',
             'data-op-date': getMinuteTime()
           })
 
