@@ -206,15 +206,10 @@ const changeTrack = (opType: TRACK_COMMAND_TYPE, param: CommandProps) => {
     }
   })
   if (currentTr.steps.length) {
-    // set a custom meta to tail Our TrackChangeExtension to ignore this change
-    // TODO: is there any official field to do this?
+    // set a custom meta to tell our TrackChangeExtension to ignore this change
     currentTr.setMeta('trackManualChanged', true)
-    // apply to current editor state and get a new state
-    const newState = param.editor.state.apply(currentTr)
-    // update the new state to editor to render new content
-    param.editor.view.updateState(newState)
   }
-  return false
+  return true
 }
 
 // @ts-ignore
@@ -539,21 +534,23 @@ export const TrackChangeExtension = Extension.create<{ enabled: boolean, onStatu
             newChangeTr.step(step)
           })
         }
-        const newState = editor.state.apply(newChangeTr)
-        editor.view.updateState(newState)
-        // TODO: if there has cursor change action, can there change be merged to one tr with one updateState?
       }
     })
 
-    // calculate new cursor postion
+    // Calculate new cursor position and update selection
     const finalNewPos = trackChangeEnabled ? (currentNewPos + posOffset) : currentNewPos
-    if (trackChangeEnabled) {
-      const trWithChange = editor.view.state.tr
-      trWithChange.setSelection(TextSelection.create(editor.view.state.doc, finalNewPos))
-      const newStateWithNewSelection = editor.view.state.apply(trWithChange)
+    if (trackChangeEnabled && newChangeTr.steps.length > 0) {
+      newChangeTr.setSelection(TextSelection.create(newChangeTr.doc, finalNewPos))
       LOG_ENABLED && console.log('update cursor', finalNewPos)
-      editor.view.updateState(newStateWithNewSelection)
     }
+
+    // Apply the transaction if we made changes
+    if (newChangeTr.steps.length > 0) {
+      newChangeTr.setMeta('trackManualChanged', true)
+      const newState = editor.state.apply(newChangeTr)
+      editor.view.updateState(newState)
+    }
+
     if (isChineseStart && hasAddAndDelete && trackChangeEnabled) {
       // if the first chinese input and have some content selected
       // just make it stop by blur action
