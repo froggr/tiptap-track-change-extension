@@ -353,10 +353,13 @@ export const TrackChangeExtension = Extension.create<{ enabled: boolean, onStatu
             }
 
             for (let i = 0; i < transaction.steps.length; i++) {
-              const step = transaction.steps[i]
-              LOG_ENABLED && console.log('Step type:', step.constructor.name, 'is ReplaceStep?', step instanceof ReplaceStep)
+              const step = transaction.steps[i] as any
+              LOG_ENABLED && console.log('Step type:', step.constructor.name, 'has from/to?', 'from' in step && 'to' in step)
 
-              if (step instanceof ReplaceStep) {
+              // Check by properties instead of instanceof (minification breaks instanceof)
+              const isReplaceStep = ('from' in step && 'to' in step && 'slice' in step)
+
+              if (isReplaceStep) {
                 const stepMap = step.getMap()
 
                 // Handle insertions - mark new content
