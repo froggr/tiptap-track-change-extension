@@ -345,10 +345,16 @@ export const TrackChangeExtension = Extension.create<{ enabled: boolean, onStatu
           // Process all steps from all transactions
           let currentPos = 0
           for (const transaction of transactions) {
-            if (transaction.getMeta('trackManualChanged') || transaction.getMeta('history$')) continue
+            LOG_ENABLED && console.log('Processing transaction, steps:', transaction.steps.length)
+
+            if (transaction.getMeta('trackManualChanged') || transaction.getMeta('history$')) {
+              LOG_ENABLED && console.log('Skipping transaction: trackManualChanged or history$')
+              continue
+            }
 
             for (let i = 0; i < transaction.steps.length; i++) {
               const step = transaction.steps[i]
+              LOG_ENABLED && console.log('Step type:', step.constructor.name, 'is ReplaceStep?', step instanceof ReplaceStep)
 
               if (step instanceof ReplaceStep) {
                 const stepMap = step.getMap()
